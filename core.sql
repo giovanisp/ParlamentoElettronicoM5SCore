@@ -55,14 +55,15 @@ COMMENT ON FUNCTION "highlight"
 
 
 CREATE TABLE "system_setting" (
-        "member_ttl"            INTERVAL );
+        "member_ttl"            INTERVAL,
+        "gui_preset"            TEXT );
 CREATE UNIQUE INDEX "system_setting_singleton_idx" ON "system_setting" ((1));
 
 COMMENT ON TABLE "system_setting" IS 'This table contains only one row with different settings in each column.';
 COMMENT ON INDEX "system_setting_singleton_idx" IS 'This index ensures that "system_setting" only contains one row maximum.';
 
 COMMENT ON COLUMN "system_setting"."member_ttl" IS 'Time after members get their "active" flag set to FALSE, if they do not show any activity.';
-
+COMMENT ON COLUMN "system_setting"."gui_preset" IS 'Choose from configured gui from the array config.gui_preset';
 
 CREATE TABLE "contingent" (
         PRIMARY KEY ("polling", "time_frame"),
@@ -87,12 +88,15 @@ COMMENT ON TYPE "notify_level" IS 'Level of notification: ''none'' = no notifica
 CREATE TABLE "member" (
         "id"                    SERIAL4         PRIMARY KEY,
         "created"               TIMESTAMPTZ     NOT NULL DEFAULT now(),
+        "creator_id"            INT4,
         "invite_code"           TEXT            UNIQUE,
         "invite_code_expiry"    TIMESTAMPTZ,
         "admin_comment"         TEXT,
         "activated"             TIMESTAMPTZ,
         "last_activity"         DATE,
         "last_login"            TIMESTAMPTZ,
+        "certified"             TIMESTAMPTZ,
+        "certifier_id"          INT4,
         "login"                 TEXT            UNIQUE,
         "password"              TEXT,
         "locked"                BOOLEAN         NOT NULL DEFAULT FALSE,
@@ -108,6 +112,8 @@ CREATE TABLE "member" (
         "password_reset_secret"        TEXT     UNIQUE,
         "password_reset_secret_expiry" TIMESTAMPTZ,
         "name"                  TEXT            UNIQUE,
+        "firstname"             TEXT,
+        "lastname"              TEXT,
         "identification"        TEXT            UNIQUE,
         "authentication"        TEXT,
         "organizational_unit"   TEXT,
@@ -116,11 +122,19 @@ CREATE TABLE "member" (
         "birthday"              DATE,
         "address"               TEXT,
         "email"                 TEXT,
+        "nin"                   TEXT UNIQUE,
         "xmpp_address"          TEXT,
         "website"               TEXT,
         "phone"                 TEXT,
+        "rsa_public_key"        BYTEA,
+        "certification_level"   INTEGER NOT NULL DEFAULT 0,
+        "token_serial"          TEXT,
         "mobile_phone"          TEXT,
         "profession"            TEXT,
+	"elected"		BOOLEAN,
+	"auditor"		BOOLEAN,
+	"lqfb_access"		BOOLEAN,
+	"unit_group_id"  	INT4,
         "external_memberships"  TEXT,
         "external_posts"        TEXT,
         "formatting_engine"     TEXT,
@@ -139,15 +153,35 @@ CREATE TRIGGER "update_text_search_data"
     "name", "identification", "organizational_unit", "internal_posts",
     "realname", "external_memberships", "external_posts", "statement" );
 
+CREATE FUNCTION nin_insert_trigger()
+  RETURNS TRIGGER 
+  LANGUAGE plpgsql VOLATILE AS $$
+    DECLARE myrec int;
+    BEGIN
+       IF length (NEW.nin) = 16 OR NEW.nin ISNULL THEN
+		RETURN NEW;
+	ELSE
+		RAISE EXCEPTION 'Wrong lenght';
+      END IF;
+      RETURN NULL;
+   END;
+  $$;
+CREATE TRIGGER nin_validation
+  BEFORE INSERT OR UPDATE ON "member"
+  FOR EACH ROW EXECUTE PROCEDURE nin_insert_trigger();
+
 COMMENT ON TABLE "member" IS 'Users of the system, e.g. members of an organization';
 
 COMMENT ON COLUMN "member"."created"              IS 'Creation of member record and/or invite code';
+COMMENT ON COLUMN "member"."creator_id"           IS 'Auditor member who created this account';
 COMMENT ON COLUMN "member"."invite_code"          IS 'Optional invite code, to allow a member to initialize his/her account the first time';
 COMMENT ON COLUMN "member"."invite_code_expiry"   IS 'Expiry data/time for "invite_code"';
 COMMENT ON COLUMN "member"."admin_comment"        IS 'Hidden comment for administrative purposes';
 COMMENT ON COLUMN "member"."activated"            IS 'Timestamp of first activation of account (i.e. usage of "invite_code"); required to be set for "active" members';
 COMMENT ON COLUMN "member"."last_activity"        IS 'Date of last activity of member; required to be set for "active" members';
 COMMENT ON COLUMN "member"."last_login"           IS 'Timestamp of last login';
+COMMENT ON COLUMN "member"."certified"            IS 'Timestamp of certification of account';
+COMMENT ON COLUMN "member"."certifier_id"         IS 'Auditor member who certified this account';
 COMMENT ON COLUMN "member"."login"                IS 'Login name';
 COMMENT ON COLUMN "member"."password"             IS 'Password (preferably as crypto-hash, depending on the frontend or access layer)';
 COMMENT ON COLUMN "member"."locked"               IS 'Locked members can not log in.';
@@ -161,16 +195,26 @@ COMMENT ON COLUMN "member"."notify_email_secret_expiry" IS 'Expiry date/time for
 COMMENT ON COLUMN "member"."notify_email_lock_expiry"   IS 'Date/time until no further email confirmation mails may be sent (abuse protection)';
 COMMENT ON COLUMN "member"."notify_level"         IS 'Selects which event notifications are to be sent to the "notify_email" mail address, may be NULL if member did not make any selection yet';
 COMMENT ON COLUMN "member"."name"                 IS 'Distinct name of the member, may be NULL if account has not been activated yet';
+COMMENT ON COLUMN "member"."firstname"            IS 'Real first of the member, may be NULL if account has not been activated yet';
+COMMENT ON COLUMN "member"."lastname"             IS 'Real last of the member, may be NULL if account has not been activated yet';
 COMMENT ON COLUMN "member"."identification"       IS 'Optional identification number or code of the member';
 COMMENT ON COLUMN "member"."authentication"       IS 'Information about how this member was authenticated';
 COMMENT ON COLUMN "member"."organizational_unit"  IS 'Branch or division of the organization the member belongs to';
 COMMENT ON COLUMN "member"."internal_posts"       IS 'Posts (offices) of the member inside the organization';
+COMMENT ON COLUMN "member"."rsa_public_key"       IS 'RSA Public Key for member';
+COMMENT ON COLUMN "member"."certification_level"  IS '0 = non certificato, 1 = certificato, 2 = pec, 3 = token';
+COMMENT ON COLUMN "member"."token_serial"         IS 'Token serial';
 COMMENT ON COLUMN "member"."realname"             IS 'Real name of the member, may be identical with "name"';
+COMMENT ON COLUMN "member"."elected"              IS 'Member was selected by vote for an office';
+COMMENT ON COLUMN "member"."auditor"              IS 'Member is an auditor who can create, modify or certify other members';
+COMMENT ON COLUMN "member"."lqfb_access"          IS 'Member has access to lqfb. If FALSE member can still use admin and auditor functions';
 COMMENT ON COLUMN "member"."email"                IS 'Published email address of the member; not used for system notifications';
+COMMENT ON COLUMN "member"."nin"                  IS 'National Insurance Number';
 COMMENT ON COLUMN "member"."external_memberships" IS 'Other organizations the member is involved in';
 COMMENT ON COLUMN "member"."external_posts"       IS 'Posts (offices) outside the organization';
 COMMENT ON COLUMN "member"."formatting_engine"    IS 'Allows different formatting engines (i.e. wiki formats) to be used for "member"."statement"';
 COMMENT ON COLUMN "member"."statement"            IS 'Freely chosen text of the member for his/her profile';
+COMMENT ON COLUMN "member"."unit_group_id"        IS 'ID of city of location of residence';
 
 
 -- DEPRECATED API TABLES --
@@ -209,124 +253,6 @@ COMMENT ON TABLE "member_history" IS 'Filled by trigger; keeps information about
 
 COMMENT ON COLUMN "member_history"."id"    IS 'Primary key, which can be used to sort entries correctly (and time warp resistant)';
 COMMENT ON COLUMN "member_history"."until" IS 'Timestamp until the data was valid';
-
-
-CREATE TABLE "rendered_member_statement" (
-        PRIMARY KEY ("member_id", "format"),
-        "member_id"             INT8            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "format"                TEXT,
-        "content"               TEXT            NOT NULL );
-
-COMMENT ON TABLE "rendered_member_statement" IS 'This table may be used by frontends to cache "rendered" member statements (e.g. HTML output generated from wiki text)';
-
-
-CREATE TABLE "setting" (
-        PRIMARY KEY ("member_id", "key"),
-        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "key"                   TEXT            NOT NULL,
-        "value"                 TEXT            NOT NULL );
-CREATE INDEX "setting_key_idx" ON "setting" ("key");
-
-COMMENT ON TABLE "setting" IS 'Place to store a frontend specific setting for members as a string';
-
-COMMENT ON COLUMN "setting"."key" IS 'Name of the setting, preceded by a frontend specific prefix';
-
-
-CREATE TABLE "setting_map" (
-        PRIMARY KEY ("member_id", "key", "subkey"),
-        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "key"                   TEXT            NOT NULL,
-        "subkey"                TEXT            NOT NULL,
-        "value"                 TEXT            NOT NULL );
-CREATE INDEX "setting_map_key_idx" ON "setting_map" ("key");
-
-COMMENT ON TABLE "setting_map" IS 'Place to store a frontend specific setting for members as a map of key value pairs';
-
-COMMENT ON COLUMN "setting_map"."key"    IS 'Name of the setting, preceded by a frontend specific prefix';
-COMMENT ON COLUMN "setting_map"."subkey" IS 'Key of a map entry';
-COMMENT ON COLUMN "setting_map"."value"  IS 'Value of a map entry';
-
-
-CREATE TABLE "member_relation_setting" (
-        PRIMARY KEY ("member_id", "key", "other_member_id"),
-        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "key"                   TEXT            NOT NULL,
-        "other_member_id"       INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "value"                 TEXT            NOT NULL );
-
-COMMENT ON TABLE "member_relation_setting" IS 'Place to store a frontend specific setting related to relations between members as a string';
-
-
-CREATE TYPE "member_image_type" AS ENUM ('photo', 'avatar');
-
-COMMENT ON TYPE "member_image_type" IS 'Types of images for a member';
-
-
-CREATE TABLE "member_image" (
-        PRIMARY KEY ("member_id", "image_type", "scaled"),
-        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "image_type"            "member_image_type",
-        "scaled"                BOOLEAN,
-        "content_type"          TEXT,
-        "data"                  BYTEA           NOT NULL );
-
-COMMENT ON TABLE "member_image" IS 'Images of members';
-
-COMMENT ON COLUMN "member_image"."scaled" IS 'FALSE for original image, TRUE for scaled version of the image';
-
-
-CREATE TABLE "member_count" (
-        "calculated"            TIMESTAMPTZ     NOT NULL DEFAULT now(),
-        "total_count"           INT4            NOT NULL );
-
-COMMENT ON TABLE "member_count" IS 'Contains one row which contains the total count of active(!) members and a timestamp indicating when the total member count and area member counts were calculated';
-
-COMMENT ON COLUMN "member_count"."calculated"  IS 'timestamp indicating when the total member count and area member counts were calculated';
-COMMENT ON COLUMN "member_count"."total_count" IS 'Total count of active(!) members';
-
-
-CREATE TABLE "contact" (
-        PRIMARY KEY ("member_id", "other_member_id"),
-        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "other_member_id"       INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "public"                BOOLEAN         NOT NULL DEFAULT FALSE,
-        CONSTRAINT "cant_save_yourself_as_contact"
-          CHECK ("member_id" != "other_member_id") );
-CREATE INDEX "contact_other_member_id_idx" ON "contact" ("other_member_id");
-
-COMMENT ON TABLE "contact" IS 'Contact lists';
-
-COMMENT ON COLUMN "contact"."member_id"       IS 'Member having the contact list';
-COMMENT ON COLUMN "contact"."other_member_id" IS 'Member referenced in the contact list';
-COMMENT ON COLUMN "contact"."public"          IS 'TRUE = display contact publically';
-
-
-CREATE TABLE "ignored_member" (
-        PRIMARY KEY ("member_id", "other_member_id"),
-        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-        "other_member_id"       INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE );
-CREATE INDEX "ignored_member_other_member_id_idx" ON "ignored_member" ("other_member_id");
-
-COMMENT ON TABLE "ignored_member" IS 'Possibility to filter other members';
-
-COMMENT ON COLUMN "ignored_member"."member_id"       IS 'Member ignoring someone';
-COMMENT ON COLUMN "ignored_member"."other_member_id" IS 'Member being ignored';
-
-
-CREATE TABLE "session" (
-        "ident"                 TEXT            PRIMARY KEY,
-        "additional_secret"     TEXT,
-        "expiry"                TIMESTAMPTZ     NOT NULL DEFAULT now() + '24 hours',
-        "member_id"             INT8            REFERENCES "member" ("id") ON DELETE SET NULL,
-        "lang"                  TEXT );
-CREATE INDEX "session_expiry_idx" ON "session" ("expiry");
-
-COMMENT ON TABLE "session" IS 'Sessions, i.e. for a web-frontend or API layer';
-
-COMMENT ON COLUMN "session"."ident"             IS 'Secret session identifier (i.e. random string)';
-COMMENT ON COLUMN "session"."additional_secret" IS 'Additional field to store a secret, which can be used against CSRF attacks';
-COMMENT ON COLUMN "session"."member_id"         IS 'Reference to member, who is logged in';
-COMMENT ON COLUMN "session"."lang"              IS 'Language code of the selected language';
 
 
 CREATE TABLE "policy" (
@@ -422,6 +348,30 @@ COMMENT ON COLUMN "unit"."parent_id"    IS 'Parent id of tree node; Multiple roo
 COMMENT ON COLUMN "unit"."active"       IS 'TRUE means new issues can be created in areas of this unit';
 COMMENT ON COLUMN "unit"."member_count" IS 'Count of members as determined by column "voting_right" in table "privilege"';
 
+CREATE TABLE "unit_group" (
+        "id"                    SERIAL4         PRIMARY KEY,
+        "name"                  TEXT            NOT NULL UNIQUE DEFAULT '');
+CREATE INDEX "unit_group_idx" ON "unit_group" ("id");
+
+COMMENT ON TABLE "unit_group" IS 'Group of units (name)';
+
+CREATE TABLE "unit_group_member" (
+        PRIMARY KEY ("unit_group_id","unit_id"),
+        "unit_group_id"         INT4            REFERENCES "unit_group" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "unit_id"               INT4            REFERENCES "unit" ("id") ON DELETE CASCADE ON UPDATE CASCADE);
+
+CREATE TABLE "member_login" (
+        PRIMARY KEY ("member_id", "login_time"),
+	"member_id" 		INT4 NOT NULL REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+	"login_time" 		TIMESTAMP WITH TIME ZONE NOT NULL,
+	"geolat" 		NUMERIC(10,8), -- Latitude
+	"geolng" 		NUMERIC(11,8), -- Longitude
+	"browser" 		TEXT, -- Browser used
+	"os" 			TEXT); -- Operating system used
+COMMENT ON COLUMN "member_login"."geolat" IS 'Latitude';
+COMMENT ON COLUMN "member_login"."geolng" IS 'Longitude';
+COMMENT ON COLUMN "member_login"."browser" IS 'Browser';
+COMMENT ON COLUMN "member_login"."os" IS 'Operating system';
 
 CREATE TABLE "unit_setting" (
         PRIMARY KEY ("member_id", "key", "unit_id"),
@@ -501,6 +451,7 @@ CREATE TABLE "issue" (
         "id"                    SERIAL4         PRIMARY KEY,
         "area_id"               INT4            NOT NULL REFERENCES "area" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
         "policy_id"             INT4            NOT NULL REFERENCES "policy" ("id") ON DELETE RESTRICT ON UPDATE CASCADE,
+        "member_id"             INT4,
         "state"                 "issue_state"   NOT NULL DEFAULT 'admission',
         "phase_finished"        TIMESTAMPTZ,
         "created"               TIMESTAMPTZ     NOT NULL DEFAULT now(),
@@ -518,6 +469,11 @@ CREATE TABLE "issue" (
         "population"            INT4,
         "voter_count"           INT4,
         "status_quo_schulze_rank" INT4,
+        "title"			TEXT,
+        "brief_description"     TEXT,
+        "keywords"              TSVECTOR, 
+        "problem_description"   TEXT,
+        "aim_description"       TEXT,
         CONSTRAINT "admission_time_not_null_unless_instantly_accepted" CHECK (
           "admission_time" NOTNULL OR ("accepted" NOTNULL AND "accepted" = "created") ),
         CONSTRAINT "valid_state" CHECK (
@@ -581,6 +537,11 @@ COMMENT ON COLUMN "issue"."latest_snapshot_event"   IS 'Event type of latest sna
 COMMENT ON COLUMN "issue"."population"              IS 'Sum of "weight" column in table "direct_population_snapshot"';
 COMMENT ON COLUMN "issue"."voter_count"             IS 'Total number of direct and delegating voters; This value is related to the final voting, while "population" is related to snapshots before the final voting';
 COMMENT ON COLUMN "issue"."status_quo_schulze_rank" IS 'Schulze rank of status quo, as calculated by "calculate_ranks" function';
+COMMENT ON COLUMN "issue"."title"                   IS 'Issue full title';
+COMMENT ON COLUMN "issue"."brief_description"       IS 'Brief description of the issue';
+COMMENT ON COLUMN "issue"."keywords"                IS 'Keyword provided by the author';
+COMMENT ON COLUMN "issue"."problem_description"     IS 'Description of the problem to be solved';
+COMMENT ON COLUMN "issue"."aim_description"         IS 'Description of the issue aim';
 
 
 CREATE TABLE "issue_setting" (
@@ -592,6 +553,7 @@ CREATE TABLE "issue_setting" (
 
 COMMENT ON TABLE "issue_setting" IS 'Place for frontend to store issue specific settings of members as strings';
 
+CREATE TYPE "author_type" AS ENUM ('elected', 'other');
 
 CREATE TABLE "initiative" (
         UNIQUE ("issue_id", "id"),  -- index needed for foreign-key on table "vote"
@@ -624,6 +586,10 @@ CREATE TABLE "initiative" (
         "winner"                BOOLEAN,
         "rank"                  INT4,
         "text_search_data"      TSVECTOR,
+        "title"                 TEXT,
+        "brief_description"     TEXT,
+        "competence_fields"     TEXT,
+        "author_type"           author_type,
         CONSTRAINT "all_or_none_of_revoked_and_revoked_by_member_id_must_be_null"
           CHECK ("revoked" NOTNULL = "revoked_by_member_id" NOTNULL),
         CONSTRAINT "non_revoked_initiatives_cant_suggest_other"
@@ -680,6 +646,10 @@ COMMENT ON COLUMN "initiative"."multistage_majority"    IS 'TRUE, if either (a) 
 COMMENT ON COLUMN "initiative"."eligible"               IS 'Initiative has a "direct_majority" and an "indirect_majority", is "better_than_status_quo" and depending on selected policy the initiative has no "reverse_beat_path" or "multistage_majority"';
 COMMENT ON COLUMN "initiative"."winner"                 IS 'Winner is the "eligible" initiative with best "schulze_rank" and in case of ties with lowest "id"';
 COMMENT ON COLUMN "initiative"."rank"                   IS 'Unique ranking for all "admitted" initiatives per issue; lower rank is better; a winner always has rank 1, but rank 1 does not imply that an initiative is winner; initiatives with "direct_majority" AND "indirect_majority" always have a better (lower) rank than other initiatives';
+COMMENT ON COLUMN "initiative"."title"                  IS 'Initiative full title';
+COMMENT ON COLUMN "initiative"."brief_description"      IS 'Brief description of the initiative';
+COMMENT ON COLUMN "initiative"."competence_fields"      IS 'Technical competence fields';
+COMMENT ON COLUMN "initiative"."author_type"            IS 'Type of author';
 
 
 CREATE TABLE "battle" (
@@ -1174,6 +1144,177 @@ COMMENT ON INDEX "notification_sent_singleton_idx" IS 'This index ensures that "
 
 
 
+
+CREATE TABLE "template" (
+        "id"                    SERIAL4         PRIMARY KEY,
+        "name"                  TEXT,
+        "description"           TEXT );
+COMMENT ON TABLE "template"                  IS 'Template for areas';
+COMMENT ON COLUMN "template"."name"          IS 'Name for the template';
+COMMENT ON COLUMN "template"."description"   IS 'Description for the template';
+
+CREATE TABLE "template_area" (
+        "id"                    SERIAL4         PRIMARY KEY,
+        "template_id"           INTEGER REFERENCES "template" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "name"                  TEXT,
+        "active"                BOOLEAN         NOT NULL DEFAULT true,
+        "description"           TEXT );
+COMMENT ON TABLE "template_area"                  IS 'Template areas to be used within a template';
+COMMENT ON COLUMN "template_area"."active"        IS 'TRUE means new issues can be created in this area';
+COMMENT ON COLUMN "template_area"."name"          IS 'Name for template area';
+COMMENT ON COLUMN "template_area"."description"   IS 'Description for template area';
+
+CREATE TABLE "template_area_allowed_policy" (
+        PRIMARY KEY ("template_area_id", "policy_id"),
+        "template_area_id"      INT4         REFERENCES "template_area" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "policy_id"             INT4         REFERENCES "policy" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "default_policy"        BOOLEAN NOT NULL DEFAULT false);
+CREATE UNIQUE INDEX "template_area_allowed_policy_one_default_per_area_idx" ON "template_area_allowed_policy" ("template_area_id") WHERE "default_policy";
+COMMENT ON TABLE "template_area_allowed_policy" IS 'Selects which policies can be used in each template area';
+COMMENT ON COLUMN "template_area_allowed_policy"."default_policy" IS 'One policy per template area can be set as default.';
+
+CREATE TABLE "rendered_member_statement" (
+        PRIMARY KEY ("member_id", "format"),
+        "member_id"             INT8            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "format"                TEXT,
+        "content"               TEXT            NOT NULL );
+
+COMMENT ON TABLE "rendered_member_statement" IS 'This table may be used by frontends to cache "rendered" member statements (e.g. HTML output generated from wiki text)';
+
+
+CREATE TABLE "setting" (
+        PRIMARY KEY ("member_id", "key"),
+        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "key"                   TEXT            NOT NULL,
+        "value"                 TEXT            NOT NULL );
+CREATE INDEX "setting_key_idx" ON "setting" ("key");
+
+COMMENT ON TABLE "setting" IS 'Place to store a frontend specific setting for members as a string';
+
+COMMENT ON COLUMN "setting"."key" IS 'Name of the setting, preceded by a frontend specific prefix';
+
+
+CREATE TABLE "setting_map" (
+        PRIMARY KEY ("member_id", "key", "subkey"),
+        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "key"                   TEXT            NOT NULL,
+        "subkey"                TEXT            NOT NULL,
+        "value"                 TEXT            NOT NULL );
+CREATE INDEX "setting_map_key_idx" ON "setting_map" ("key");
+
+COMMENT ON TABLE "setting_map" IS 'Place to store a frontend specific setting for members as a map of key value pairs';
+
+COMMENT ON COLUMN "setting_map"."key"    IS 'Name of the setting, preceded by a frontend specific prefix';
+COMMENT ON COLUMN "setting_map"."subkey" IS 'Key of a map entry';
+COMMENT ON COLUMN "setting_map"."value"  IS 'Value of a map entry';
+
+
+CREATE TABLE "member_relation_setting" (
+        PRIMARY KEY ("member_id", "key", "other_member_id"),
+        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "key"                   TEXT            NOT NULL,
+        "other_member_id"       INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "value"                 TEXT            NOT NULL );
+
+COMMENT ON TABLE "member_relation_setting" IS 'Place to store a frontend specific setting related to relations between members as a string';
+
+
+CREATE TYPE "member_image_type" AS ENUM ('photo', 'avatar');
+
+COMMENT ON TYPE "member_image_type" IS 'Types of images for a member';
+
+
+CREATE TABLE "member_image" (
+        PRIMARY KEY ("member_id", "image_type", "scaled"),
+        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "image_type"            "member_image_type",
+        "scaled"                BOOLEAN,
+        "content_type"          TEXT,
+        "data"                  BYTEA           NOT NULL );
+
+COMMENT ON TABLE "member_image" IS 'Images of members';
+
+COMMENT ON COLUMN "member_image"."scaled" IS 'FALSE for original image, TRUE for scaled version of the image';
+
+
+CREATE TABLE "member_count" (
+        "calculated"            TIMESTAMPTZ     NOT NULL DEFAULT now(),
+        "total_count"           INT4            NOT NULL );
+
+COMMENT ON TABLE "member_count" IS 'Contains one row which contains the total count of active(!) members and a timestamp indicating when the total member count and area member counts were calculated';
+
+COMMENT ON COLUMN "member_count"."calculated"  IS 'timestamp indicating when the total member count and area member counts were calculated';
+COMMENT ON COLUMN "member_count"."total_count" IS 'Total count of active(!) members';
+
+
+CREATE TABLE "contact" (
+        PRIMARY KEY ("member_id", "other_member_id"),
+        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "other_member_id"       INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "public"                BOOLEAN         NOT NULL DEFAULT FALSE,
+        CONSTRAINT "cant_save_yourself_as_contact"
+          CHECK ("member_id" != "other_member_id") );
+CREATE INDEX "contact_other_member_id_idx" ON "contact" ("other_member_id");
+
+COMMENT ON TABLE "contact" IS 'Contact lists';
+
+COMMENT ON COLUMN "contact"."member_id"       IS 'Member having the contact list';
+COMMENT ON COLUMN "contact"."other_member_id" IS 'Member referenced in the contact list';
+COMMENT ON COLUMN "contact"."public"          IS 'TRUE = display contact publically';
+
+
+CREATE TABLE "ignored_member" (
+        PRIMARY KEY ("member_id", "other_member_id"),
+        "member_id"             INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        "other_member_id"       INT4            REFERENCES "member" ("id") ON DELETE CASCADE ON UPDATE CASCADE );
+CREATE INDEX "ignored_member_other_member_id_idx" ON "ignored_member" ("other_member_id");
+
+COMMENT ON TABLE "ignored_member" IS 'Possibility to filter other members';
+
+COMMENT ON COLUMN "ignored_member"."member_id"       IS 'Member ignoring someone';
+COMMENT ON COLUMN "ignored_member"."other_member_id" IS 'Member being ignored';
+
+
+CREATE TABLE "session" (
+        "ident"                 TEXT            PRIMARY KEY,
+        "additional_secret"     TEXT,
+        "expiry"                TIMESTAMPTZ     NOT NULL DEFAULT now() + '24 hours',
+        "member_id"             INT8            REFERENCES "member" ("id") ON DELETE SET NULL,
+        "lang"                  TEXT );
+CREATE INDEX "session_expiry_idx" ON "session" ("expiry");
+
+COMMENT ON TABLE "session" IS 'Sessions, i.e. for a web-frontend or API layer';
+
+COMMENT ON COLUMN "session"."ident"             IS 'Secret session identifier (i.e. random string)';
+COMMENT ON COLUMN "session"."additional_secret" IS 'Additional field to store a secret, which can be used against CSRF attacks';
+COMMENT ON COLUMN "session"."member_id"         IS 'Reference to member, who is logged in';
+COMMENT ON COLUMN "session"."lang"              IS 'Language code of the selected language';
+
+CREATE TABLE checked_event (
+        "event_id"               INT4 NOT NULL,
+        "member_id"              INT4 NOT NULL,
+        CONSTRAINT "checked_event_pkey" PRIMARY KEY ("event_id", "member_id"),
+        CONSTRAINT "checked_event_event_id_fkey" FOREIGN KEY ("event_id") REFERENCES "event" ("id") MATCH SIMPLE ON UPDATE CASCADE ON DELETE CASCADE,
+        CONSTRAINT "checked_event_member_id_fkey" FOREIGN KEY ("member_id") REFERENCES "member" ("id") MATCH SIMPLE ON UPDATE CASCADE ON DELETE CASCADE);
+
+COMMENT ON TABLE "checked_event" IS 'Possibility to filter events';
+
+CREATE TABLE keyword (
+        "id"                     SERIAL4      PRIMARY KEY,
+        "name"                   TEXT         NOT NULL UNIQUE);
+COMMENT ON TABLE "keyword" IS 'Possibility to filter issues';
+
+CREATE TABLE issue_keyword (
+        "issue_id"               INT4         NOT NULL,
+        "keyword_id"             INT4         NOT NULL,
+        CONSTRAINT "issue_keyword_pkey" PRIMARY KEY ("issue_id", "keyword_id"),
+        CONSTRAINT "issue_keyword_issue_id_fkey" FOREIGN KEY ("issue_id") REFERENCES "issue" ("id") MATCH SIMPLE ON UPDATE CASCADE ON DELETE CASCADE,
+        CONSTRAINT "issue_keyword_keyword_id_fkey" FOREIGN KEY ("keyword_id") REFERENCES "keyword" ("id") MATCH SIMPLE ON UPDATE CASCADE ON DELETE CASCADE);
+
+COMMENT ON TABLE "issue_keyword" IS 'Keywords to issues association';
+
+
+
 ----------------------------------------------
 -- Writing of history entries and event log --
 ----------------------------------------------
@@ -1570,6 +1711,7 @@ CREATE TRIGGER "voter_comment_fields_only_set_when_voter_comment_is_set"
 
 COMMENT ON FUNCTION "voter_comment_fields_only_set_when_voter_comment_is_set_trigger"() IS 'Implementation of trigger "voter_comment_fields_only_set_when_voter_comment_is_set" ON table "direct_voter"';
 COMMENT ON TRIGGER "voter_comment_fields_only_set_when_voter_comment_is_set" ON "direct_voter" IS 'If "comment" is set to NULL, then other comment related fields are also set to NULL.';
+
 
 
 ---------------------------------------------------------------
@@ -4482,7 +4624,5 @@ CREATE FUNCTION "delete_private_data"()
   $$;
 
 COMMENT ON FUNCTION "delete_private_data"() IS 'Used by lf_export script. DO NOT USE on productive database, but only on a copy! This function deletes all data which should not be publicly available, and can be used to create a database dump for publication. See source code to see which data is deleted. If you need a different behaviour, copy this function and modify lf_export accordingly, to avoid data-leaks after updating.';
-
-
 
 COMMIT;
